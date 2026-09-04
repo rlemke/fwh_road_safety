@@ -269,28 +269,6 @@ def _county_geometry(url: str, say) -> dict[str, Any]:
         return {}
 
 
-_DISPATCH = {
-    "roadsafety.source.FARS": handle_fars,
-    "roadsafety.source.VMT": handle_vmt,
-    "roadsafety.StateRates": handle_state_rates,
-    "roadsafety.RateMap": handle_rate_map,
-    "roadsafety.source.CountyPopulation": handle_county_population,
-    "roadsafety.CountyRates": handle_county_rates,
-    "roadsafety.CountyMap": handle_county_map,
-}
-
-
-def handle(payload: dict) -> dict:
-    facet = payload["_facet_name"]
-    fn = _DISPATCH.get(facet)
-    if fn is None:
-        raise KeyError(f"no roadsafety handler for {facet!r}")
-    return fn(payload)
-
-
-def facet_names() -> list[str]:
-    return sorted(_DISPATCH)
-
 
 def register_handlers(runner) -> None:
     """RegistryRunner registration — one entrypoint per facet."""
@@ -309,3 +287,124 @@ def register_poller(poller) -> None:
 
 def register_all_registry_handlers(runner) -> None:
     register_handlers(runner)
+
+
+# ---------------------------------------------------------------------------
+# roads: deaths per mile of named route
+# ---------------------------------------------------------------------------
+
+TIGER_ROADS_URL = ("https://www2.census.gov/geo/tiger/TIGER2023/PRISECROADS/"
+                   "tl_2023_{fips:02d}_prisecroads.zip")
+
+_STATE_FIPS = [1,2,4,5,6,8,9,10,11,12,13,15,16,17,18,19,20,21,22,23,24,25,26,27,
+               28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,44,45,46,47,48,49,50,
+               51,53,54,55,56]
+
+
+def handle_road_risk(params: dict[str, Any]) -> dict[str, Any]:
+    """Deaths per mile of named route, joined to TIGER geometry."""
+    from dataclasses import asdict as _asdict
+
+    from . import _roads
+
+    say = _log(params)
+    years = [int(y) for y in (params.get("years") or [2023])]
+    crashes = []
+    for path in params["crash_paths"]:
+        d = json.loads(store.read_text(str(path)))
+        crashes.extend(_lib.Crash(**c) for c in d["crashes"])
+    names = {}
+    for c in crashes:
+        names.setdefault(c.state_fips, c.state)
+
+    tiger: dict[int, list] = {}
+    geom: dict[str, list] = {}
+    for fips in _STATE_FIPS:
+        url = TIGER_ROADS_URL.format(fips=fips)
+        try:
+            with zipfile.ZipFile(io.BytesIO(_fetch(url, timeout=300))) as z:
+                shp = z.read(next(n for n in z.namelist() if n.endswith(".shp")))
+                dbf = z.read(next(n for n in z.namelist() if n.endswith(".dbf")))
+            tiger[fips] = _roads.read_tiger_lines(shp, dbf)
+        except Exception as exc:  # noqa: BLE001
+            say(f"TIGER roads unavailable for FIPS {fips}: {type(exc).__name__}",
+                level="warning")
+            continue
+    say(f"TIGER: {sum(len(v) for v in tiger.values()):,} numbered-route segments "
+        f"across {len(tiger)} states")
+
+    risks, diag = _roads.road_risk(crashes, tiger, names, n_years=len(years))
+    # ⚠️ Geometry has to be BOTH filtered and simplified. Keeping every point of
+    # every scoring route produced a 357 MB page — technically correct and
+    # completely unusable. Cap the drawn set and decimate the vertices; the line
+    # is showing WHERE a route is, not surveying it.
+    top_n = int(params.get("draw_top") or 800)
+    drawn = sorted(risks, key=lambda r: -r.per_mile_year)[:top_n]
+    keep = {(r.state_fips, r.rttyp, r.route.split("-", 1)[1]) for r in drawn}
+    tol = float(params.get("simplify_deg") or 0.004)   # ~400 m
+
+    def _thin(line):
+        out = [line[0]]
+        for pt in line[1:-1]:
+            if (abs(pt[0] - out[-1][0]) + abs(pt[1] - out[-1][1])) >= tol:
+                out.append(pt)
+        out.append(line[-1])
+        return out
+
+    for fips, lines in tiger.items():
+        for key, _m, line in lines:
+            if (fips, key[0], key[1]) in keep:
+                t = _thin(line)
+                if len(t) >= 2:
+                    geom.setdefault(f"{fips}:{key[0]}:{key[1]}", []).append(t)
+    risks = drawn
+
+    dest = str(params["dest"])
+    store.write_text(dest, json.dumps({
+        "years": years, "n_years": len(years),
+        "measure": "road deaths per mile of route",
+        "diagnostics": diag,
+        "roads": [_asdict(r) for r in risks],
+        "geometry": geom,
+    }))
+    say(f"{diag['routes']:,} routes; {diag['deaths_no_route_in_tway']:,} deaths not on a "
+        f"parseable numbered route; {diag['deaths_route_without_geometry']:,} on a route "
+        f"with no TIGER geometry", level="warning")
+    return {"risk_path": dest, "routes": diag["routes"],
+            "deaths_off_route": diag["deaths_no_route_in_tway"],
+            "deaths_no_geometry": diag["deaths_route_without_geometry"]}
+
+
+def handle_road_map(params: dict[str, Any]) -> dict[str, Any]:
+    from .render_roads import render_road_map
+
+    say = _log(params)
+    data = json.loads(store.read_text(str(params["risk_path"])))
+    html, drawn = render_road_map(data)
+    dest = str(params["dest"])
+    store.write_text(dest, html)
+    return {"map_path": dest, "routes_drawn": drawn}
+
+_DISPATCH = {
+    "roadsafety.source.FARS": handle_fars,
+    "roadsafety.source.VMT": handle_vmt,
+    "roadsafety.StateRates": handle_state_rates,
+    "roadsafety.RateMap": handle_rate_map,
+    "roadsafety.source.CountyPopulation": handle_county_population,
+    "roadsafety.CountyRates": handle_county_rates,
+    "roadsafety.CountyMap": handle_county_map,
+    "roadsafety.RoadRisk": handle_road_risk,
+    "roadsafety.RoadMap": handle_road_map,
+}
+
+
+def handle(payload: dict) -> dict:
+    facet = payload["_facet_name"]
+    fn = _DISPATCH.get(facet)
+    if fn is None:
+        raise KeyError(f"no roadsafety handler for {facet!r}")
+    return fn(payload)
+
+
+def facet_names() -> list[str]:
+    return sorted(_DISPATCH)

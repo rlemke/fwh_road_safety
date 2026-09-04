@@ -92,6 +92,9 @@ class Crash:
     #: would otherwise become a real-looking 5-digit FIPS that matches nothing.
     county_fips: int | None = None
     county: str = ""
+    #: FARS TWAY_ID — the named road. 100% populated, and the only route
+    #: identifier available without HPMS.
+    trafficway: str = ""
 
 
 @dataclass
@@ -189,6 +192,7 @@ def parse_fars(zip_bytes: bytes, year: int) -> tuple[list[Crash], CoordAudit]:
             rural_urban=(row.get("RUR_URBNAME") or "").strip(),
             county_fips=_int_or_none(row.get("COUNTY")),
             county=(row.get("COUNTYNAME") or "").strip(),
+            trafficway=(row.get("TWAY_ID") or "").strip(),
         ))
     # ⚠️ Fail loudly on an empty parse. Skipping unparseable rows is right; doing
     # it for EVERY row and returning success is not — that is how a BOM turned a

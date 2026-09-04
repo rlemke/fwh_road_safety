@@ -251,3 +251,66 @@ def test_an_all_rows_skipped_parse_raises_instead_of_returning_empty():
                     "WRONG,COLUMNS\n1,2\n")
     with pytest.raises(ValueError, match="NO crashes"):
         _lib.parse_fars(z.getvalue(), 2022)
+
+
+# --- roads: deaths per mile -------------------------------------------------
+
+from roadsafety import _roads
+
+
+def test_fars_and_tiger_name_the_same_road_differently():
+    """⚠️ The join is (type, number) because the sources disagree on spelling:
+    FARS 'US-1' vs TIGER 'US Hwy 1'+RTTYP=U, and TIGER writes interstates with a
+    space ('I- 95')."""
+    assert _roads.fars_route_key("US-1") == ("U", "1")
+    assert _roads.tiger_route_key("US Hwy 1", "U") == ("U", "1")
+    assert _roads.fars_route_key("I-95") == ("I", "95")
+    assert _roads.tiger_route_key("I- 95", "I") == ("I", "95")
+    assert _roads.fars_route_key("SR-99") == ("S", "99")
+    assert _roads.tiger_route_key("State Hwy 99", "S") == ("S", "99")
+
+
+def test_only_the_first_route_in_tway_id_is_the_crash_road():
+    """'US-31 SR-3' is a junction: the crash is on US-31, SR-3 is the cross
+    street. Counting both would double-attribute the death."""
+    assert _roads.fars_route_key("US-31 SR-3") == ("U", "31")
+
+
+def test_unnumbered_roads_are_skipped_not_guessed():
+    for v in ("CR-BOE RD", "MAIN ST", "", "FARM RD 12 1/2"):
+        k = _roads.fars_route_key(v)
+        assert k is None or k[0] in ("I", "U", "S", "C")
+
+
+def test_leading_zeros_do_not_split_a_route():
+    """FARS 'US-001' and TIGER 'US Hwy 1' are the same road."""
+    assert _roads.fars_route_key("US-001") == _roads.tiger_route_key("US Hwy 1", "U")
+
+
+def test_short_stubs_are_excluded_from_the_ranking():
+    """⚠️ Same reason the county map has a reliability floor: a 0.4-mile stub
+    with one death scores 2.5 deaths/mile and would top the list on a rounding
+    artifact."""
+    c = [_lib.Crash("FARS", 2023, 1, "X", "1", 0, 0, 1, trafficway="US-9")]
+    lines = [(("U", "9"), 0.4, [[0, 0], [0.01, 0]])]
+    out, _ = _roads.road_risk(c, {1: lines}, {1: "X"}, n_years=1, min_miles=5.0)
+    assert out == []
+
+
+def test_per_mile_reorders_against_raw_count():
+    """The whole point: by count the deadliest roads are the longest busy ones."""
+    c = ([_lib.Crash("FARS", 2023, 1, "X", str(i), 0, 0, 1, trafficway="I-5")
+          for i in range(100)]
+         + [_lib.Crash("FARS", 2023, 1, "X", "s" + str(i), 0, 0, 1, trafficway="SR-9")
+            for i in range(10)])
+    lines = [(("I", "5"), 1000.0, [[0, 0], [1, 0]]),
+             (("S", "9"), 10.0, [[0, 0], [0.1, 0]])]
+    out, _ = _roads.road_risk(c, {1: lines}, {1: "X"}, n_years=1)
+    assert out[0].route == "SR-9"          # per mile
+    assert max(out, key=lambda r: r.fatalities).route == "I-5"   # by count
+
+
+def test_length_is_measured_not_assumed():
+    lines = [(("I", "5"), 0, [[-100.0, 40.0], [-100.0, 41.0]])]
+    miles = _roads._haversine_miles((-100.0, 40.0), (-100.0, 41.0))
+    assert 68 < miles < 70          # one degree of latitude ~69 miles

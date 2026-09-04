@@ -90,6 +90,27 @@ namespace roadsafety {
     event facet CountyMap(rates_path: String, geometry_url: String, dest: String) => (map_path: String, counties_drawn: Long)
         with Effect(kind = "io") with Cost(tier = "free")
 
+    /** Deaths per MILE of each numbered route, from FARS + TIGER geometry.
+      *
+      * ⚠️ The closest thing to "which roads are dangerous" the public data
+      * supports without AADT. Per mile removes the "long roads have more
+      * crashes" effect but NOT the "busy roads have more crashes" one.
+      *
+      * ⚠️ Coverage is partial and reported: 75,111 of 202,338 deaths (2019-23)
+      * are not on a parseable numbered route at all — local streets and unnamed
+      * roads — and 15,017 more are on a route with no TIGER geometry. The map
+      * under-counts rather than mis-attributes. */
+    event facet RoadRisk(crash_paths: [String], years: [Long], dest: String, draw_top: Long = 800, simplify_deg: Double = 0.004) => (risk_path: String, routes: Long, deaths_off_route: Long, deaths_no_geometry: Long)
+        with Effect(kind = "io") with Cost(tier = "moderate")
+
+    /** Named roads coloured by deaths per mile.
+      *
+      * ⚠️ Geometry is filtered AND simplified. Keeping every vertex of every
+      * scoring route produced a 357 MB page — technically correct and completely
+      * unusable. The line shows WHERE a route is, it does not survey it. */
+    event facet RoadMap(risk_path: String, dest: String) => (map_path: String, routes_drawn: Long)
+        with Effect(kind = "io") with Cost(tier = "free")
+
     workflow FatalCrashRateByState(
         year: Long = 2023,
         work_dir: String = "",
