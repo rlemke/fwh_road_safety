@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fwh-road-safety"
+version = "0.1.0"
+description = "US road-safety risk from NHTSA FARS, normalised by FHWA vehicle-miles travelled"
+requires-python = ">=3.11"
+dependencies = [
+    "facetwork>=0.31.0",
+    "openpyxl>=3.1",     # FHWA publishes VM-2 only as .xlsx
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.8.0"]
+
+[project.entry-points."facetwork.domains"]
+road-safety = "roadsafety:domain"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+roadsafety = ["ffl/*.ffl"]

@@ -1,0 +1,115 @@
+// US road-safety risk: NHTSA FARS fatalities normalised by FHWA vehicle-miles.
+//
+// ⚠️ A FATAL-CRASH measure, not a "dangerous roads" measure. FARS records fatal
+// crashes only. Fatal crashes concentrate on high-speed rural roads; injury
+// crashes concentrate on urban arterials, so this and a high-injury network
+// disagree almost everywhere.
+//
+// ⚠️ Exposure normalisation is in v1 deliberately. A raw fatal-crash COUNT map
+// is a population map with extra steps — it ranks California, Texas and Florida
+// first because that is where the driving happens. The rate per 100M VMT is what
+// NHTSA reports, and it reorders the map completely.
+
+namespace roadsafety {
+
+    schema CoordAudit {
+        total: Long,
+        usable: Long,
+        sentinel: Long,
+        unparseable: Long
+    }
+
+}
+
+namespace roadsafety.source {
+
+        /** FARS national CSV -> the common crash schema.
+          *
+          * ⚠️ Returns a coordinate AUDIT, not just crashes. FARS codes an unknown
+          * location as a run of 7s/8s/9s rather than leaving it blank, and those
+          * parse as valid floats — 77.7777 N is in the Arctic Ocean. How many
+          * crashes lost their location is a property of the result, so a caller
+          * cannot render a map without seeing it. */
+        event facet FARS(year: Long = 2023, dest: String) => (crashes_path: String, crashes: Long, fatalities: Long,
+                usable_coords: Long, sentinel_coords: Long, source_url: String)
+            with Effect(kind = "io") with Cost(tier = "moderate")
+
+        /** FHWA Highway Statistics table VM-2 -> annual VMT per state.
+          *
+          * ⚠️ Published only as .xlsx, and as a Crystal Reports export: the
+          * header spans four rows and the grand total sits in a column to the
+          * RIGHT of the visible table. */
+        event facet VMT(year: Long = 2023, dest: String) => (vmt_path: String, states: Long, total_vmt_millions: Double,
+                source_url: String)
+            with Effect(kind = "io") with Cost(tier = "free")
+}
+
+namespace roadsafety {
+
+    /** Join fatalities to exposure and compute the rate per 100M VMT.
+      *
+      * ⚠️ Only states present in BOTH sources are returned, and `dropped` says
+      * how many were not. A state with crashes but no VMT would otherwise vanish
+      * from the map, and one with VMT but no crashes would render as a genuine
+      * zero rather than as missing. */
+    event facet StateRates(crashes_path: String, vmt_path: String, dest: String) => (rates_path: String, states: Long, dropped: Long,
+            national_rate: Double, fatalities: Long)
+        with Effect(kind = "pure") with Cost(tier = "free")
+
+    /** Choropleth of the rate, with the Poisson interval in the popup.
+      *
+      * ⚠️ The interval is shown because a rate built on 342 deaths
+      * (Massachusetts) is not comparable to one built on 3,800 (Texas), and a
+      * choropleth invites exactly that comparison. */
+    event facet RateMap(rates_path: String, geometry_url: String, dest: String) => (map_path: String, states_drawn: Long, title: String)
+        with Effect(kind = "io") with Cost(tier = "free")
+
+    workflow FatalCrashRateByState(
+        year: Long = 2023,
+        work_dir: String = "",
+        geometry_url: String = "https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_state_20m.zip"
+    ) => (map: String, national_rate: Double, states: Long,
+          fatalities: Long, sentinel_coords: Long) andThen {
+
+        base = fw.file.MakeDir(path = $.work_dir)
+
+        crashes = roadsafety.source.FARS(
+            year = $.year,
+            dest = $.work_dir ++ "/fars"
+        ) after base
+
+        vmt = roadsafety.source.VMT(
+            year = $.year,
+            dest = $.work_dir ++ "/vmt"
+        ) after base
+
+        rates = roadsafety.StateRates(
+            crashes_path = crashes.crashes_path,
+            vmt_path = vmt.vmt_path,
+            dest = $.work_dir ++ "/rates.json"
+        )
+
+        map = roadsafety.RateMap(
+            rates_path = rates.rates_path,
+            geometry_url = $.geometry_url,
+            dest = $.work_dir ++ "/fatal-crash-rate.html"
+        )
+
+        // Record what produced this, from what, with which software. The FARS
+        // file is REVISED after publication, so a run is only reproducible if it
+        // says which download it used.
+        prov = fw.provenance.Manifest(
+            outputs = $.work_dir,
+            inputs = [crashes.crashes_path, vmt.vmt_path],
+            run_mode = "live"
+        ) after map
+
+        yield FatalCrashRateByState(
+            map = map.map_path,
+            national_rate = rates.national_rate,
+            states = rates.states,
+            fatalities = rates.fatalities,
+            sentinel_coords = crashes.sentinel_coords
+        )
+    }
+}
