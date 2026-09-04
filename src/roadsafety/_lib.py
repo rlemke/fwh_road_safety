@@ -88,6 +88,10 @@ class Crash:
     #: and FARS supplies it without touching OSM.
     functional_system: str = ""
     rural_urban: str = ""
+    #: FIPS within the state. ⚠️ FARS codes an unknown county as 998/999, which
+    #: would otherwise become a real-looking 5-digit FIPS that matches nothing.
+    county_fips: int | None = None
+    county: str = ""
 
 
 @dataclass
@@ -120,6 +124,13 @@ class CoordAudit:
 # ---------------------------------------------------------------------------
 
 
+def _int_or_none(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_fars(zip_bytes: bytes, year: int) -> tuple[list[Crash], CoordAudit]:
     """FARS national zip -> the common crash schema, with a coordinate audit.
 
@@ -134,7 +145,19 @@ def parse_fars(zip_bytes: bytes, year: int) -> tuple[list[Crash], CoordAudit]:
                      if n.lower().endswith("/accident.csv") or n.lower() == "accident.csv"), None)
         if name is None:
             raise ValueError("no accident.csv in the FARS archive")
-        text = z.read(name).decode("latin-1")
+        raw = z.read(name)
+    # ⚠️ utf-8-sig FIRST, to strip a BOM. The 2022 national file starts with
+    # EF BB BF; decoded as latin-1 the first column name becomes "\ufeffSTATE"
+    # in disguise, every row["STATE"] raises KeyError, and a parser that skipped
+    # bad rows silently returned ZERO crashes from a 24 MB file while reporting
+    # success. latin-1 remains the fallback because older years carry bytes that
+    # are not valid UTF-8.
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    if text and text[0] == "\ufeff":
+        text = text[1:]
     for row in csv.DictReader(io.StringIO(text)):
         audit.total += 1
         lat = lon = None
@@ -164,7 +187,19 @@ def parse_fars(zip_bytes: bytes, year: int) -> tuple[list[Crash], CoordAudit]:
             fatalities=int(row.get("FATALS") or 0),
             functional_system=(row.get("FUNC_SYSNAME") or "").strip(),
             rural_urban=(row.get("RUR_URBNAME") or "").strip(),
+            county_fips=_int_or_none(row.get("COUNTY")),
+            county=(row.get("COUNTYNAME") or "").strip(),
         ))
+    # ⚠️ Fail loudly on an empty parse. Skipping unparseable rows is right; doing
+    # it for EVERY row and returning success is not — that is how a BOM turned a
+    # 24 MB file into zero crashes with no error anywhere.
+    if audit.total and not out:
+        raise ValueError(
+            f"parsed {audit.total} row(s) from {name} but produced NO crashes — "
+            "the column layout probably changed (a BOM on the first header did "
+            "exactly this to the 2022 file)")
+    if not audit.total:
+        raise ValueError(f"{name} contained no rows")
     return out, audit
 
 

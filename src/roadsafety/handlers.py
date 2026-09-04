@@ -133,7 +133,7 @@ def _state_geometry(url: str, say) -> dict[str, Any]:
         return {}
 
 
-def _read_shapefile(shp: bytes, dbf: bytes) -> dict[str, Any]:
+def _read_shapefile(shp: bytes, dbf: bytes, key: str = "STATEFP") -> dict[str, Any]:
     import struct
 
     # --- dbf: find the STATEFP column ---
@@ -153,7 +153,7 @@ def _read_shapefile(shp: bytes, dbf: bytes) -> dict[str, Any]:
         for name, flen in fields:
             vals[name] = rec[pos:pos + flen].decode("latin-1").strip()
             pos += flen
-        fips_by_index.append(vals.get("STATEFP", ""))
+        fips_by_index.append(vals.get(key, ""))
 
     # --- shp: polygons only (type 5) ---
     out: dict[str, list] = {}
@@ -180,11 +180,103 @@ def _read_shapefile(shp: bytes, dbf: bytes) -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# county: fatalities per 100,000 residents
+# ---------------------------------------------------------------------------
+
+COUNTY_POP_URL = ("https://www2.census.gov/programs-surveys/popest/datasets/"
+                  "2020-2023/counties/totals/co-est2023-alldata.csv")
+
+
+def handle_county_population(params: dict[str, Any]) -> dict[str, Any]:
+    from . import _county
+
+    say = _log(params)
+    year = int(params.get("year") or 2023)
+    dest = str(params["dest"])
+    say(f"Census county population {year}: {COUNTY_POP_URL}")
+    pop = _county.parse_county_population(_fetch(COUNTY_POP_URL), year)
+    out = dest + "/county_population.json"
+    store.write_text(out, json.dumps({
+        "source": "Census PEP", "year": year, "source_url": COUNTY_POP_URL,
+        "counties": {k: {"county": v[0], "state": v[1], "population": v[2]}
+                     for k, v in pop.items()},
+    }))
+    return {"population_path": out, "counties": len(pop),
+            "total_population": sum(v[2] for v in pop.values()),
+            "source_url": COUNTY_POP_URL}
+
+
+def handle_county_rates(params: dict[str, Any]) -> dict[str, Any]:
+    from dataclasses import asdict as _asdict
+
+    from . import _county
+
+    say = _log(params)
+    years = [int(y) for y in (params.get("years") or [2023])]
+    dest = str(params["dest"])
+    crashes = []
+    for path in params["crash_paths"]:
+        d = json.loads(store.read_text(str(path)))
+        crashes.extend(_lib.Crash(**c) for c in d["crashes"])
+    pop_doc = json.loads(store.read_text(str(params["population_path"])))
+    pop = {k: (v["county"], v["state"], v["population"])
+           for k, v in pop_doc["counties"].items()}
+    rates, diag = _county.county_rates(crashes, pop)
+    if diag["connecticut_records_excluded"]:
+        # ⚠️ Not a footnote. FARS still codes CT with the 8 legacy counties while
+        # Census 2023 uses 9 Planning Regions; the overlap is EMPTY, so a silent
+        # join would blank the state out.
+        say(f"Connecticut EXCLUDED: {diag['connecticut_records_excluded']} crash records — "
+            f"FARS uses the legacy 8 counties, Census 2023 uses 9 planning regions, "
+            f"and they do not intersect", level="warning")
+    if diag["unmatched_fars_counties"]:
+        say(f"{diag['unmatched_fars_counties']} FARS county code(s) matched no "
+            f"Census county", level="warning")
+    store.write_text(dest, json.dumps({
+        "years": years, "n_years": len(years), "measure": "fatalities per 100k residents",
+        "diagnostics": diag,
+        "rates": [_asdict(r) for r in rates],
+    }, indent=1))
+    say(f"{diag['counties']:,} counties, {diag['reliable_counties']:,} with >=20 deaths")
+    return {"rates_path": dest, "counties": diag["counties"],
+            "reliable": diag["reliable_counties"],
+            "excluded_records": diag["connecticut_records_excluded"]}
+
+
+def handle_county_map(params: dict[str, Any]) -> dict[str, Any]:
+    from .render_county import render_county_map
+
+    say = _log(params)
+    data = json.loads(store.read_text(str(params["rates_path"])))
+    geom = _county_geometry(str(params["geometry_url"]), say)
+    html, drawn = render_county_map(data, geom)
+    dest = str(params["dest"])
+    store.write_text(dest, html)
+    return {"map_path": dest, "counties_drawn": drawn}
+
+
+def _county_geometry(url: str, say) -> dict[str, Any]:
+    try:
+        raw = _fetch(url, timeout=240)
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            shp = next(n for n in z.namelist() if n.endswith(".shp"))
+            dbf = next(n for n in z.namelist() if n.endswith(".dbf"))
+            return _read_shapefile(z.read(shp), z.read(dbf), key="GEOID")
+    except Exception as exc:  # noqa: BLE001
+        say(f"county geometry unavailable ({type(exc).__name__}); table only",
+            level="warning")
+        return {}
+
+
 _DISPATCH = {
     "roadsafety.source.FARS": handle_fars,
     "roadsafety.source.VMT": handle_vmt,
     "roadsafety.StateRates": handle_state_rates,
     "roadsafety.RateMap": handle_rate_map,
+    "roadsafety.source.CountyPopulation": handle_county_population,
+    "roadsafety.CountyRates": handle_county_rates,
+    "roadsafety.CountyMap": handle_county_map,
 }
 
 

@@ -42,6 +42,13 @@ namespace roadsafety.source {
         event facet VMT(year: Long = 2023, dest: String) => (vmt_path: String, states: Long, total_vmt_millions: Double,
                 source_url: String)
             with Effect(kind = "io") with Cost(tier = "free")
+
+    /** Census county population estimates -> the per-capita denominator.
+      *
+      * ⚠️ Population is NOT exposure. It is the denominator that exists at
+      * county scale because county VMT is not published. */
+    event facet CountyPopulation(year: Long = 2023, dest: String) => (population_path: String, counties: Long, total_population: Double, source_url: String)
+        with Effect(kind = "io") with Cost(tier = "free")
 }
 
 namespace roadsafety {
@@ -62,6 +69,25 @@ namespace roadsafety {
       * (Massachusetts) is not comparable to one built on 3,800 (Texas), and a
       * choropleth invites exactly that comparison. */
     event facet RateMap(rates_path: String, geometry_url: String, dest: String) => (map_path: String, states_drawn: Long, title: String)
+        with Effect(kind = "io") with Cost(tier = "free")
+
+    /** County deaths per 100,000 residents, pooled over several years.
+      *
+      * ⚠️ Pooling is not cosmetic. On one year only 15% of counties reach the
+      * NCHS reliability threshold of 20 deaths; over five years, 62% do.
+      *
+      * ⚠️ Connecticut is EXCLUDED and the count is returned. FARS still codes it
+      * with the 8 legacy counties while the Census 2023 vintage uses 9 planning
+      * regions; the overlap is EMPTY, so a silent join blanks the state out. */
+    event facet CountyRates(crash_paths: [String], population_path: String, years: [Long], dest: String) => (rates_path: String, counties: Long, reliable: Long, excluded_records: Long)
+        with Effect(kind = "pure") with Cost(tier = "free")
+
+    /** County choropleth. Colour breaks come from RELIABLE counties only —
+      * Loving County, Texas scores 9,767 per 100k (21 deaths, 43 residents) and
+      * would otherwise flatten every other county into one bin. Counties below
+      * the threshold are drawn hatched rather than dropped, because a blank
+      * county reads as missing data rather than as a small number. */
+    event facet CountyMap(rates_path: String, geometry_url: String, dest: String) => (map_path: String, counties_drawn: Long)
         with Effect(kind = "io") with Cost(tier = "free")
 
     workflow FatalCrashRateByState(

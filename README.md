@@ -59,6 +59,48 @@ is **40,901**. Both `accident.FATALS` and `person.INJ_SEV=4` in that file agree
 on 41,025, so it is a later revision, not a parse error. The workflow writes a
 `fw.provenance` manifest recording which download produced a given result.
 
+## County: deaths per 100,000 residents
+
+A **different measure**, not a finer-grained one. Per-VMT answers "how deadly per
+unit of travel"; per-capita answers "how deadly for the people who live here".
+County VMT is not published, so this uses the denominator that exists — and says
+so.
+
+⚠️ **Population is a poor proxy for exposure in small counties.** Median rate by
+county size, 2019–2023:
+
+| county population | median deaths / 100k / yr |
+|---|---|
+| under 5,000 | **200.4** |
+| 5,000–25,000 | 33.4 |
+| 25,000–100,000 | 18.0 |
+| 100,000–500,000 | 11.6 |
+| over 500,000 | **8.3** |
+
+A 24× spread. Rural residents are not dying 24× more often per mile driven; they
+live where other people's driving happens. Loving County, Texas tops the raw list
+at **9,767 per 100k** from 21 deaths among 43 residents — and it *passes* the
+NCHS reliability threshold, which is the point: the ≥20-event rule does not
+rescue a per-capita denominator on a through-traffic county.
+
+⚠️ **Pooling years is not cosmetic.** On one year only **15%** of counties reach
+20 deaths; over five years, **62%** do. Counties below the threshold are drawn
+hatched rather than dropped, because a blank county reads as missing data rather
+than as a small number.
+
+⚠️ **Connecticut is excluded** (1,426 crash records). FARS still codes it with
+the 8 legacy counties; the Census 2023 vintage uses 9 planning regions. The
+overlap is **empty**, so a silent join blanks the state out — and the legacy
+counties do not aggregate cleanly into the new regions, because towns were
+reassigned.
+
+⚠️ **A UTF-8 BOM silently zeroed a whole year.** The 2022 national file begins
+with `EF BB BF`; decoded as latin-1 the first column name is no longer `STATE`,
+every row lookup raises `KeyError`, and a parser that skipped bad rows returned
+**zero crashes from a 24 MB file while reporting success** — 39,422 crashes and
+42,721 deaths lost in silence. Now decoded `utf-8-sig` first, and an all-rows-
+skipped parse raises instead of returning empty.
+
 ## Not in v1
 
 - **County and segment geography.** County VMT is not published as a standard

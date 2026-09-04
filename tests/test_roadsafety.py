@@ -160,3 +160,94 @@ def test_render_degrades_to_a_table_without_geometry():
          "rates": [{"state_fips": 1, "state": "Alabama", "fatalities": 1, "crashes": 1,
                     "vmt_millions": 100.0, "rate": 1.0, "rate_lo": 0.1, "rate_hi": 5.0}]}, {})
     assert drawn == 0 and "Alabama" in html
+
+
+# --- county: per-capita, and why that is a different measure -----------------
+
+from roadsafety import _county
+
+
+def _pop(**kw):
+    return {f: (n, s, p) for f, (n, s, p) in kw.items()}
+
+
+def test_connecticut_is_excluded_not_silently_dropped():
+    """⚠️ The regression this exists for. FARS still codes CT with the 8 legacy
+    counties (09001–09015); the Census 2023 vintage uses 9 planning regions
+    (09110–09190). The overlap is EMPTY, so a naive join blanks the whole state
+    out with no error. It is excluded explicitly and COUNTED."""
+    crashes = [_lib.Crash("FARS", 2023, 9, "Connecticut", "1", 41.3, -72.9, 2,
+                          county_fips=9),
+               _lib.Crash("FARS", 2023, 1, "Alabama", "2", 33.0, -86.0, 3,
+                          county_fips=1)]
+    pop = _pop(**{"01001": ("Autauga", "Alabama", 60000),
+                  "09110": ("Capitol Planning Region", "Connecticut", 900000)})
+    rates, diag = _county.county_rates(crashes, pop)
+    assert diag["connecticut_records_excluded"] == 1
+    assert all(not r.fips.startswith("09") for r in rates)
+
+
+def test_unknown_county_codes_do_not_become_real_fips():
+    """FARS codes an unknown county 998/999; concatenated they would form a
+    plausible 5-digit FIPS that matches nothing and vanishes without a trace."""
+    crashes = [_lib.Crash("FARS", 2023, 1, "Alabama", "1", 33.0, -86.0, 4,
+                          county_fips=998)]
+    _, diag = _county.county_rates(crashes, _pop(**{"01001": ("A", "Alabama", 1000)}))
+    assert diag["unknown_county_records"] == 1
+
+
+def test_a_county_with_no_deaths_is_a_real_zero():
+    """⚠️ Dropping it would make the map look like coverage stops at the county
+    line. Zero road deaths is a fact, not missing data."""
+    rates, _ = _county.county_rates(
+        [], _pop(**{"01001": ("Autauga", "Alabama", 60000)}))
+    assert len(rates) == 1 and rates[0].fatalities == 0 and rates[0].rate == 0.0
+
+
+def test_small_counties_are_flagged_unreliable():
+    """⚠️ Loving County, Texas: 21 deaths among 43 residents = 9,767 per 100k.
+    The NCHS convention is that a rate on fewer than 20 events is unreliable —
+    and note it does NOT rescue Loving, which is why the page also carries the
+    through-traffic caveat."""
+    crashes = [_lib.Crash("FARS", 2023, 1, "X", str(i), 0, 0, 1, county_fips=1)
+               for i in range(5)]
+    rates, diag = _county.county_rates(crashes, _pop(**{"01001": ("Small", "X", 800)}))
+    assert rates[0].fatalities == 5 and rates[0].reliable is False
+    assert diag["reliable_counties"] == 0
+
+
+def test_reliability_threshold_is_the_nchs_one():
+    assert _county.UNRELIABLE_BELOW_EVENTS == 20
+
+
+def test_population_parse_refuses_a_truncated_file():
+    bad = b"SUMLEV,STATE,COUNTY,STNAME,CTYNAME,POPESTIMATE2023\n040,01,000,Alabama,Alabama,5000000\n"
+    with pytest.raises(ValueError, match="only"):
+        _county.parse_county_population(bad, 2023)
+
+
+# --- the BOM ----------------------------------------------------------------
+
+def test_a_utf8_bom_does_not_silently_zero_the_file():
+    """⚠️ The 2022 national file starts with EF BB BF. Decoded as latin-1 the
+    first column became 'STATE' in disguise, every row[\"STATE\"] raised KeyError,
+    and the parser returned ZERO crashes from a 24 MB file while reporting
+    success — 39,422 crashes and 42,721 deaths lost in silence."""
+    cols = "STATE,STATENAME,ST_CASE,LATITUDE,LONGITUD,FATALS,COUNTY\n"
+    body = (cols + "1,Alabama,1,33.5,-86.8,1,13\n").encode("utf-8")
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("FARS2022NationalCSV/accident.csv", b"\xef\xbb\xbf" + body)
+    crashes, audit = _lib.parse_fars(z.getvalue(), 2022)
+    assert len(crashes) == 1 and crashes[0].state_fips == 1
+
+
+def test_an_all_rows_skipped_parse_raises_instead_of_returning_empty():
+    """Skipping a bad row is right; skipping every row and reporting success is
+    how the BOM stayed invisible."""
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("FARS2022NationalCSV/accident.csv",
+                    "WRONG,COLUMNS\n1,2\n")
+    with pytest.raises(ValueError, match="NO crashes"):
+        _lib.parse_fars(z.getvalue(), 2022)
