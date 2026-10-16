@@ -127,8 +127,8 @@ lg.innerHTML='<b>deaths / 100k / yr</b><br>'+PAL.map((c,i)=>{
   return `<span style="background:${c}"></span>${a}`;}).join('<br>')
   +'<br><span style="background:#fff;border:1px solid #999"></span>&lt;20 deaths (hatched)';
 const map=new maplibregl.Map({container:'map',style:{version:8,
-  sources:{bm:{type:'raster',tiles:['https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'],
-    tileSize:256,attribution:'&copy; OpenStreetMap contributors &copy; CARTO'}},
+  sources:{bm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+    tileSize:256,attribution:'&copy; OpenStreetMap contributors'}},
   layers:[{id:'bm',type:'raster',source:'bm'}]},center:[-96,38.5],zoom:3.4});
 map.addControl(new maplibregl.NavigationControl());
 map.on('load',()=>{

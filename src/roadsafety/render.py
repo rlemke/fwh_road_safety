@@ -112,8 +112,8 @@ lg.innerHTML='<b>per 100M VMT</b><br>'+PAL.map((c,i)=>{
       :BR[i-1].toFixed(2)+'–'+BR[i].toFixed(2));
   return `<span style="background:${c}"></span>${a}`;}).join('<br>');
 const map=new maplibregl.Map({container:'map',style:{version:8,
-  sources:{bm:{type:'raster',tiles:['https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'],
-    tileSize:256,attribution:'&copy; OpenStreetMap contributors &copy; CARTO'}},
+  sources:{bm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+    tileSize:256,attribution:'&copy; OpenStreetMap contributors'}},
   layers:[{id:'bm',type:'raster',source:'bm'}]},center:[-96,38.5],zoom:3.2});
 map.addControl(new maplibregl.NavigationControl());
 map.on('load',()=>{
